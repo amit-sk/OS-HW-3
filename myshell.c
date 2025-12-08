@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdbool.h>
 #include <string.h>
 #include <sys/types.h>
@@ -6,11 +8,19 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 
 #define GENERAL_SUCCESS (0)
 #define GENERAL_FAILURE (-1)
 #define PROC_ARGLIST_CONTINUE (1)
 #define PROC_ARGLIST_STOP (0)
+
+void handler(int signum)
+{
+    // handler for SIGINT: the parent (shell) should not terminate upon SIGINT.
+    printf("handler called for signal %d\n", signum); // TODO: DEBUG
+    fflush(stdout);
+}
 
 bool is_piping_command(int count, char** arglist)
 {
@@ -60,6 +70,11 @@ int run_command(int count, char** arglist, bool should_wait)
         goto cleanup;
     } else if (0 == pid) {
         // child process
+        if (SIG_ERR == signal(SIGINT, SIG_DFL)) {  // restore default behavior for SIGINT before execvp.
+            // this does not cause the shell (parent process) to exit, only the child process.
+            perror("signal failed");
+            exit(1);
+        }
         if (-1 == execvp(arglist[0], arglist)) {
             // should not return here unless error.
             // this does not cause the shell (parent process) to exit, only the child process.
@@ -85,6 +100,15 @@ cleanup:
 
 int prepare(void)
 {
+    // the parent (shell) should not terminate upon SIGINT.
+    struct sigaction new_action = {0};
+    new_action.sa_handler = handler;
+    new_action.sa_flags = SA_RESTART;
+
+    if (-1 == sigaction(SIGINT, &new_action, NULL)) {
+        perror("sigaction failed");
+        return GENERAL_FAILURE;
+    }
     return GENERAL_SUCCESS;
 }
 
@@ -125,5 +149,6 @@ cleanup:
 
 int finalize(void)
 {
+    signal(SIGINT, SIG_DFL); // restore default behavior for SIGINT - best effort, doesn't check for errors.
     return GENERAL_SUCCESS;
 }
