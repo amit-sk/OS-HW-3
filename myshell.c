@@ -1,5 +1,8 @@
 #include <stdbool.h>
 #include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #define GENERAL_SUCCESS (0)
 #define GENERAL_FAILURE (-1)
@@ -44,6 +47,31 @@ bool is_output_redirection_command(int count, char** arglist)
     return false;
 }
 
+int run_foreground_command(int count, char** arglist)
+{
+    int child_exit_code = -1;
+    pid_t pid = fork();
+    if (-1 == pid) {
+        // TODO: error handling
+        return GENERAL_FAILURE;
+    } else if (0 == pid) {
+        // child process
+        if (-1 == execvp(arglist[0], arglist)) {
+            // should not return here unless error
+            // TODO: error handling
+            return GENERAL_FAILURE;
+        }
+    } else {
+        // parent process
+        if (-1 == waitpid(pid, &child_exit_code, 0)) {
+            // TODO: error handling
+            return GENERAL_FAILURE;
+        }
+        // do we even care about the child's exit code?
+    }
+    return GENERAL_SUCCESS;
+}
+
 int prepare(void)
 {
     return GENERAL_SUCCESS;
@@ -58,25 +86,27 @@ int prepare(void)
 */
 int process_arglist(int count, char** arglist)
 {
+    int return_value = PROC_ARGLIST_STOP;
+
     // first detect special operations if there are any.
     // assumption: a command line will contain at most one type of special operation.
     if (is_piping_command(count, arglist)) {
         // handle piping commands
-    }
-    else if (is_background_command(count, arglist)) {
+    } else if (is_background_command(count, arglist)) {
         // handle background commands
-    }
-    else if (is_input_redirection_command(count, arglist)) {
+    } else if (is_input_redirection_command(count, arglist)) {
         // handle input redirection commands
-    }
-    else if (is_output_redirection_command(count, arglist)) {
+    } else if (is_output_redirection_command(count, arglist)) {
         // handle output redirection commands
-    }
-    else {
-        // handle simple commands
+    } else {
+        if (run_foreground_command(count, arglist) != GENERAL_SUCCESS) {
+            goto cleanup;
+        }
     }
 
-    return PROC_ARGLIST_CONTINUE;
+    return_value = PROC_ARGLIST_CONTINUE;
+cleanup:
+    return return_value;
 }
 
 int finalize(void)
