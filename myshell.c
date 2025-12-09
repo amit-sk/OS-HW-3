@@ -57,10 +57,31 @@ bool is_output_redirection_command(int count, char** arglist)
     return false;
 }
 
+int count_pipes(int count, char** arglist)
+{
+    int pipe_count = 0;
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(arglist[i], "|") == 0) {
+            pipe_count++;
+        }
+    }
+    return pipe_count;
+}
+
+void set_pipes_to_null(int count, char** arglist)
+{
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(arglist[i], "|") == 0) {
+            arglist[i] = NULL;
+        }
+    }
+}
+
 /*
  * Assumes input (arglist) is valid - the last two arguments are "<" and a filename.
 */
-int input_redirection_preparation_handler(int count, char** arglist) {
+int input_redirection_preparation_handler(int count, char** arglist)
+{
     int return_code = GENERAL_FAILURE;
     int fd = -1;
 
@@ -89,7 +110,8 @@ cleanup:
 /*
  * Assumes input (arglist) is valid - the last two arguments are ">" and a filename.
 */
-int output_redirection_preparation_handler(int count, char** arglist) {
+int output_redirection_preparation_handler(int count, char** arglist)
+{
     int return_code = GENERAL_FAILURE;
     int fd = -1;
 
@@ -152,7 +174,7 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
                 perror("waitpid failed");
                 goto cleanup;
             }
-            // do we even care about the child's exit code?
+            // TODO: do we even care about the child's exit code?
         }
     }
 
@@ -178,6 +200,99 @@ int run_output_redirection_command(int count, char** arglist)
     return run_command_internal(count, arglist, true, output_redirection_preparation_handler);
 }
 
+int run_piped_commands(int count, char** arglist)
+{
+    int return_code = GENERAL_FAILURE;
+    int pipe_fds[2] = { -1, -1 };
+    int child_exit_code = -1;
+    int pipe_count = count_pipes(count, arglist);
+    set_pipes_to_null(count, arglist);
+
+    if (9 < pipe_count) {
+        fprintf(stderr, "Error: too many pipes (maximum allowed is 10 commands).\n");
+        // drop this command and continue to the next one.
+        return_code = GENERAL_SUCCESS;  // not considered a shell (parent process) failure.
+        goto cleanup;
+    }
+
+    if (-1 == pipe(pipe_fds)) {
+        perror("pipe failed");
+        goto cleanup;
+    }
+
+    int arglist_index = 0;
+    for (int i = 0; i <= pipe_count; i++) {
+        pid_t pid = fork();
+        if (-1 == pid) {
+            perror("fork failed");
+            goto cleanup;
+        } else if (0 == pid) {
+            // child process
+            // on errors, the child process calls exit. this does not cause the shell (parent process) to exit, only the child process.
+
+            // Foreground child processes should terminate upon SIGINT.
+            if (SIG_ERR == signal(SIGINT, SIG_DFL)) {  // restore default behavior for SIGINT before execvp.
+                perror("signal failed");
+                exit(1);
+            }
+            
+            if (i > 0) {
+                // not the first command - set stdin to be the read end of the previous pipe
+                if (-1 == dup2(pipe_fds[0], STDIN_FILENO)) {
+                    perror("dup2 failed");
+                    exit(1);
+                }
+
+                close(pipe_fds[0]); // close after dup, best effort.
+            }
+            if (i < pipe_count) {
+                // not the last command - set stdout to be the write end of the current pipe
+                if (-1 == dup2(pipe_fds[1], STDOUT_FILENO)) {
+                    perror("dup2 failed");
+                    exit(1);
+                }
+
+                close(pipe_fds[1]); // close after dup, best effort.
+            }
+ 
+            if (-1 == execvp(arglist[arglist_index], &arglist[arglist_index])) {
+                // should not return here unless error.
+                perror("execvp failed");
+                exit(1);
+            }
+        } else {
+            // parent process
+            // waits for each child process to complete before continuing to the next one.
+
+            // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
+            if ((-1 == waitpid(pid, &child_exit_code, 0)) && (errno != ECHILD) && (errno != EINTR)) {
+                perror("waitpid failed");
+                goto cleanup;
+            }
+            // TODO: do we even care about the child's exit code?
+            // maybe if child fails, drop the entire pipeline and continue to next command line?
+
+            // progress arglist to the next command (unless on last command)
+            while (arglist[arglist_index] != NULL) {
+                arglist_index++;
+            }
+            arglist_index++; // skip the NULL
+        }
+    }
+
+    return_code = GENERAL_SUCCESS;
+cleanup:
+    if (-1 != pipe_fds[0]) {
+        close(pipe_fds[0]);
+        pipe_fds[0] = -1;
+    }
+    if (-1 != pipe_fds[1]) {
+        close(pipe_fds[1]);
+        pipe_fds[1] = -1;
+    }
+    return return_code;
+}
+
 int prepare(void)
 {
     if (SIG_ERR == signal(SIGINT, SIG_IGN)) {  // the parent (shell) should not terminate upon SIGINT.
@@ -201,7 +316,9 @@ int process_arglist(int count, char** arglist)
     // first detect special operations if there are any.
     // assumption: a command line will contain at most one type of special operation.
     if (is_piping_command(count, arglist)) {
-        // handle piping commands
+        if (GENERAL_SUCCESS != run_piped_commands(count, arglist)) {
+            goto cleanup;
+        }
     } else if (is_background_command(count, arglist)) {
         arglist[count - 1] = NULL; // Do not pass the & argument to execvp().
         if (GENERAL_SUCCESS != run_command(count, arglist, false)) {
@@ -216,7 +333,7 @@ int process_arglist(int count, char** arglist)
             goto cleanup;
         }
     } else {
-        if (run_command(count, arglist, true) != GENERAL_SUCCESS) {
+        if (GENERAL_SUCCESS != run_command(count, arglist, true)) {
             goto cleanup;
         }
     }
