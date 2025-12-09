@@ -3,17 +3,21 @@
 #include <stdbool.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <fcntl.h>
 
 #define GENERAL_SUCCESS (0)
 #define GENERAL_FAILURE (-1)
 #define PROC_ARGLIST_CONTINUE (1)
 #define PROC_ARGLIST_STOP (0)
+
+typedef int (*cmd_preparation_handler_t)(int, char**);
 
 bool is_piping_command(int count, char** arglist)
 {
@@ -53,7 +57,36 @@ bool is_output_redirection_command(int count, char** arglist)
     return false;
 }
 
-int run_command(int count, char** arglist, bool is_foreground)
+/*
+ * Assumes input (arglist) is valid - the last two arguments are "<" and a filename.
+*/
+int input_redirection_preparation_handler(int count, char** arglist) {
+    int return_code = GENERAL_FAILURE;
+    int fd = -1;
+
+    fd = open(arglist[count - 1], O_RDONLY, (S_IRUSR | S_IWUSR));
+    if (-1 == fd) {
+        perror("open failed");
+        goto cleanup;
+    }
+
+    // setting STDIN in child process to be the file. This does not affect the parent process.
+    if (-1 == dup2(fd, STDIN_FILENO)) {
+        perror("dup2 failed");
+        goto cleanup;
+    }
+
+    arglist[count - 2] = NULL; // remove the "<" and filename from arglist for execvp.
+
+    return_code = GENERAL_SUCCESS;
+cleanup:
+    if (-1 != fd) {
+        close(fd);
+    }
+    return return_code;
+}
+
+int run_command_internal(int count, char** arglist, bool is_foreground, cmd_preparation_handler_t preparation_handler)
 {
     int return_code = GENERAL_FAILURE;
     int child_exit_code = -1;
@@ -63,17 +96,22 @@ int run_command(int count, char** arglist, bool is_foreground)
         goto cleanup;
     } else if (0 == pid) {
         // child process
+        // on errors, the child process calls exit. this does not cause the shell (parent process) to exit, only the child process.
         if (is_foreground) {
             // Foreground child processes should terminate upon SIGINT.
             if (SIG_ERR == signal(SIGINT, SIG_DFL)) {  // restore default behavior for SIGINT before execvp.
-                // this does not cause the shell (parent process) to exit, only the child process.
                 perror("signal failed");
+                exit(1);
+            }
+        }
+        if (NULL != preparation_handler) {
+            // call child handler for preprocessing (for redirections, pipes...)
+            if (GENERAL_SUCCESS != preparation_handler(count, arglist)) {
                 exit(1);
             }
         }
         if (-1 == execvp(arglist[0], arglist)) {
             // should not return here unless error.
-            // this does not cause the shell (parent process) to exit, only the child process.
             perror("execvp failed");
             exit(1);
         }
@@ -92,6 +130,17 @@ int run_command(int count, char** arglist, bool is_foreground)
     return_code = GENERAL_SUCCESS;
 cleanup:
     return return_code;
+}
+
+int run_command(int count, char** arglist, bool is_foreground)
+{
+    return run_command_internal(count, arglist, is_foreground, NULL);
+}
+
+int run_input_redirection_command(int count, char** arglist)
+{
+    // A command line will contain at most one type of special operation, so input redirection is always a foreground command.
+    return run_command_internal(count, arglist, true, input_redirection_preparation_handler);
 }
 
 int prepare(void)
@@ -120,11 +169,13 @@ int process_arglist(int count, char** arglist)
         // handle piping commands
     } else if (is_background_command(count, arglist)) {
         arglist[count - 1] = NULL; // Do not pass the & argument to execvp().
-        if (run_command(count, arglist, false) != GENERAL_SUCCESS) {
+        if (GENERAL_SUCCESS != run_command(count, arglist, false)) {
             goto cleanup;
         }
     } else if (is_input_redirection_command(count, arglist)) {
-        // handle input redirection commands
+        if (GENERAL_SUCCESS != run_input_redirection_command(count, arglist)) {
+            goto cleanup;
+        }
     } else if (is_output_redirection_command(count, arglist)) {
         // handle output redirection commands
     } else {
