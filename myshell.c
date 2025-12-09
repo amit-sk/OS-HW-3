@@ -15,13 +15,6 @@
 #define PROC_ARGLIST_CONTINUE (1)
 #define PROC_ARGLIST_STOP (0)
 
-void handler(int signum)
-{
-    // handler for SIGINT: the parent (shell) should not terminate upon SIGINT.
-    printf("handler called for signal %d\n", signum); // TODO: DEBUG
-    fflush(stdout);
-}
-
 bool is_piping_command(int count, char** arglist)
 {
     // If a command line contains the | symbol, then it may appear multiple times. detect one such appearance.
@@ -60,7 +53,7 @@ bool is_output_redirection_command(int count, char** arglist)
     return false;
 }
 
-int run_command(int count, char** arglist, bool should_wait)
+int run_command(int count, char** arglist, bool is_foreground)
 {
     int return_code = GENERAL_FAILURE;
     int child_exit_code = -1;
@@ -70,10 +63,13 @@ int run_command(int count, char** arglist, bool should_wait)
         goto cleanup;
     } else if (0 == pid) {
         // child process
-        if (SIG_ERR == signal(SIGINT, SIG_DFL)) {  // restore default behavior for SIGINT before execvp.
-            // this does not cause the shell (parent process) to exit, only the child process.
-            perror("signal failed");
-            exit(1);
+        if (is_foreground) {
+            // Foreground child processes should terminate upon SIGINT.
+            if (SIG_ERR == signal(SIGINT, SIG_DFL)) {  // restore default behavior for SIGINT before execvp.
+                // this does not cause the shell (parent process) to exit, only the child process.
+                perror("signal failed");
+                exit(1);
+            }
         }
         if (-1 == execvp(arglist[0], arglist)) {
             // should not return here unless error.
@@ -83,7 +79,7 @@ int run_command(int count, char** arglist, bool should_wait)
         }
     } else {
         // parent process
-        if (should_wait) {
+        if (is_foreground) {
             // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
             if ((-1 == waitpid(pid, &child_exit_code, 0)) && (errno != ECHILD) && (errno != EINTR)) {
                 perror("waitpid failed");
@@ -100,13 +96,8 @@ cleanup:
 
 int prepare(void)
 {
-    // the parent (shell) should not terminate upon SIGINT.
-    struct sigaction new_action = {0};
-    new_action.sa_handler = handler;
-    new_action.sa_flags = SA_RESTART;
-
-    if (-1 == sigaction(SIGINT, &new_action, NULL)) {
-        perror("sigaction failed");
+    if (SIG_ERR == signal(SIGINT, SIG_IGN)) {  // the parent (shell) should not terminate upon SIGINT.
+        perror("signal failed");
         return GENERAL_FAILURE;
     }
     return GENERAL_SUCCESS;
