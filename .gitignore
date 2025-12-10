@@ -56,3 +56,4 @@ dkms.conf
 
 # resulting binary
 shell
+shell_debug

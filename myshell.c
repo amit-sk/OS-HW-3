@@ -138,7 +138,6 @@ cleanup:
 int run_command_internal(int count, char** arglist, bool is_foreground, cmd_preparation_handler_t preparation_handler)
 {
     int return_code = GENERAL_FAILURE;
-    int child_exit_status = -1;
     pid_t pid = fork();
     if (-1 == pid) {
         perror("fork failed");
@@ -156,28 +155,26 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
         if (NULL != preparation_handler) {
             // call child handler for preprocessing (for redirections)
             if (GENERAL_SUCCESS != preparation_handler(count, arglist)) {
+                fprintf(stderr, "Error: preparation handler failed.\n");
                 exit(1);
             }
         }
-        if (-1 == execvp(arglist[0], arglist)) {
-            // should not return here unless error.
+        if (-1 == execvp(arglist[0], arglist)) {   // should not return from here unless error.
             perror("execvp failed");
             exit(1);
         }
+        // should not reach here. just to verify child always exists.
+        fprintf(stderr, "Error: execvp unknown behaviour.\n");
+        exit(1);
     } else {
         // parent process
         if (is_foreground) {
             // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
-            if ((-1 == waitpid(pid, &child_exit_status, 0)) && (errno != ECHILD) && (errno != EINTR)) {
+            if ((-1 == waitpid(pid, NULL, 0)) && (errno != ECHILD) && (errno != EINTR)) {
                 perror("waitpid failed");
                 goto cleanup;
             }
-            
-            // checking child's status to print an error message if it failed.
-            if (WIFEXITED(child_exit_status) && (0 != WEXITSTATUS(child_exit_status))) {
-                fprintf(stderr, "Error: command \"%s\" exited with code %d.\n", arglist[0], WEXITSTATUS(child_exit_status));
-                // reporting the error but not considered a shell (parent process) failure.
-            }
+            // not checking child status, assuming child prints and handles its own errors.
         } else {
             waitpid(-1, NULL, WNOHANG); // reap any zombie processes - best effort.
         }
@@ -375,6 +372,8 @@ int process_arglist(int count, char** arglist)
 
     return_value = PROC_ARGLIST_CONTINUE;
 cleanup:
+    // to prevent zombies and remove them as fast as possible - try to wait after processing each command.
+    waitpid(-1, NULL, WNOHANG); // reap any zombie processes - best effort.
     return return_value;
 }
 
