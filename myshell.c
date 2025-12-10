@@ -203,25 +203,27 @@ int run_output_redirection_command(int count, char** arglist)
 int run_piped_commands(int count, char** arglist)
 {
     int return_code = GENERAL_FAILURE;
-    int pipe_fds[2] = { -1, -1 };
     int child_exit_code = -1;
+    int arglist_index = 0;
+    int pipe_from_prev[2] = { -1, -1 };
+    int pipe_to_next[2] = { -1, -1 };
     int pipe_count = count_pipes(count, arglist);
     set_pipes_to_null(count, arglist);
 
     if (9 < pipe_count) {
         fprintf(stderr, "Error: too many pipes (maximum allowed is 10 commands).\n");
-        // drop this command and continue to the next one.
+        // drop the pipeline command and continue to the next one.
         return_code = GENERAL_SUCCESS;  // not considered a shell (parent process) failure.
         goto cleanup;
     }
 
-    if (-1 == pipe(pipe_fds)) {
-        perror("pipe failed");
-        goto cleanup;
-    }
-
-    int arglist_index = 0;
     for (int i = 0; i <= pipe_count; i++) {
+        // for each command pair inthe pipeline
+        if ((i < pipe_count) && (-1 == pipe(pipe_to_next))) {
+            perror("pipe failed");
+            goto cleanup;
+        }
+
         pid_t pid = fork();
         if (-1 == pid) {
             perror("fork failed");
@@ -238,21 +240,23 @@ int run_piped_commands(int count, char** arglist)
             
             if (i > 0) {
                 // not the first command - set stdin to be the read end of the previous pipe
-                if (-1 == dup2(pipe_fds[0], STDIN_FILENO)) {
+                if (-1 == dup2(pipe_from_prev[0], STDIN_FILENO)) {
                     perror("dup2 failed");
                     exit(1);
                 }
 
-                close(pipe_fds[0]); // close after dup, best effort.
+                close(pipe_from_prev[0]); // close after dup, best effort.
+                pipe_from_prev[0] = -1;
             }
             if (i < pipe_count) {
-                // not the last command - set stdout to be the write end of the current pipe
-                if (-1 == dup2(pipe_fds[1], STDOUT_FILENO)) {
+                // not the last command - set stdout to be the write end of the next pipe
+                if (-1 == dup2(pipe_to_next[1], STDOUT_FILENO)) {
                     perror("dup2 failed");
                     exit(1);
                 }
 
-                close(pipe_fds[1]); // close after dup, best effort.
+                close(pipe_to_next[1]); // close after dup, best effort.
+                pipe_to_next[1] = -1;
             }
  
             if (-1 == execvp(arglist[arglist_index], &arglist[arglist_index])) {
@@ -262,6 +266,27 @@ int run_piped_commands(int count, char** arglist)
             }
         } else {
             // parent process
+
+            // close pipe ends in parent. mark as closed.
+            if (-1 != pipe_from_prev[0]) {
+                close(pipe_from_prev[0]);
+                pipe_from_prev[0] = -1;
+            }
+            if (-1 != pipe_from_prev[1]) {
+                close(pipe_from_prev[1]);
+                pipe_from_prev[1] = -1;
+            }
+
+            // close writing end of previous pipe
+            if (-1 != pipe_to_next[1]) {
+                close(pipe_to_next[1]);
+                pipe_to_next[1] = -1;
+            }
+
+            // move up the pipeline. reading end inherited by the next child process.
+            pipe_from_prev[0] = pipe_to_next[0];
+            pipe_to_next[0] = -1;
+
             // waits for each child process to complete before continuing to the next one.
 
             // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
@@ -269,8 +294,15 @@ int run_piped_commands(int count, char** arglist)
                 perror("waitpid failed");
                 goto cleanup;
             }
+
             // TODO: do we even care about the child's exit code?
-            // maybe if child fails, drop the entire pipeline and continue to next command line?
+            // maybe if child fails, drop the entire pipeline and continue to next command?
+            if (WIFEXITED(child_exit_code) && (0 != WEXITSTATUS(child_exit_code))) {
+                fprintf(stderr, "Error: command \"%s\" exited with code %d. Dropping the rest of the pipeline.\n", arglist[arglist_index], WEXITSTATUS(child_exit_code));
+                // drop the rest of the pipeline and continue to next command.
+                return_code = GENERAL_SUCCESS;  // not considered a shell (parent process) failure.
+                goto cleanup;
+            }
 
             // progress arglist to the next command (unless on last command)
             while (arglist[arglist_index] != NULL) {
@@ -282,14 +314,6 @@ int run_piped_commands(int count, char** arglist)
 
     return_code = GENERAL_SUCCESS;
 cleanup:
-    if (-1 != pipe_fds[0]) {
-        close(pipe_fds[0]);
-        pipe_fds[0] = -1;
-    }
-    if (-1 != pipe_fds[1]) {
-        close(pipe_fds[1]);
-        pipe_fds[1] = -1;
-    }
     return return_code;
 }
 

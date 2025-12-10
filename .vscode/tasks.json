@@ -30,7 +30,7 @@
             "command": "gcc",
             "args": [
                 "-g",
-                "-O0",         // no optimization
+                "-O0",
                 "-D_POSIX_C_SOURCE=200809",
                 "-Wall",
                 "-std=c11",

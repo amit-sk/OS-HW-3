@@ -8,7 +8,7 @@
             "name": "C/C++: gcc build and debug active file",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${fileDirname}/shell",
+            "program": "${fileDirname}/shell_debug",
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],
@@ -26,7 +26,7 @@
                     "ignoreFailures": true
                 }
             ],
-            "preLaunchTask": "C/C++: gcc build active file",
+            "preLaunchTask": "build-debug",
             "miDebuggerPath": "/usr/bin/gdb"
         },
     ]
