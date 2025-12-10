@@ -1,5 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
-
 #include <stdbool.h>
 #include <string.h>
 #include <sys/types.h>
@@ -140,7 +138,7 @@ cleanup:
 int run_command_internal(int count, char** arglist, bool is_foreground, cmd_preparation_handler_t preparation_handler)
 {
     int return_code = GENERAL_FAILURE;
-    int child_exit_code = -1;
+    int child_exit_status = -1;
     pid_t pid = fork();
     if (-1 == pid) {
         perror("fork failed");
@@ -156,7 +154,7 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
             }
         }
         if (NULL != preparation_handler) {
-            // call child handler for preprocessing (for redirections, pipes...)
+            // call child handler for preprocessing (for redirections)
             if (GENERAL_SUCCESS != preparation_handler(count, arglist)) {
                 exit(1);
             }
@@ -170,11 +168,18 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
         // parent process
         if (is_foreground) {
             // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
-            if ((-1 == waitpid(pid, &child_exit_code, 0)) && (errno != ECHILD) && (errno != EINTR)) {
+            if ((-1 == waitpid(pid, &child_exit_status, 0)) && (errno != ECHILD) && (errno != EINTR)) {
                 perror("waitpid failed");
                 goto cleanup;
             }
-            // TODO: do we even care about the child's exit code?
+            
+            // checking child's status to print an error message if it failed.
+            if (WIFEXITED(child_exit_status) && (0 != WEXITSTATUS(child_exit_status))) {
+                fprintf(stderr, "Error: command \"%s\" exited with code %d.\n", arglist[0], WEXITSTATUS(child_exit_status));
+                // reporting the error but not considered a shell (parent process) failure.
+            }
+        } else {
+            waitpid(-1, NULL, WNOHANG); // reap any zombie processes - best effort.
         }
     }
 
@@ -203,7 +208,7 @@ int run_output_redirection_command(int count, char** arglist)
 int run_piped_commands(int count, char** arglist)
 {
     int return_code = GENERAL_FAILURE;
-    int child_exit_code = -1;
+    int child_exit_status = -1;
     int arglist_index = 0;
     int pipe_from_prev[2] = { -1, -1 };
     int pipe_to_next[2] = { -1, -1 };
@@ -231,6 +236,13 @@ int run_piped_commands(int count, char** arglist)
         } else if (0 == pid) {
             // child process
             // on errors, the child process calls exit. this does not cause the shell (parent process) to exit, only the child process.
+            
+            // close read end of pipe to next, this child only writes to it.
+            // (writing end of pipe from prev is expected to be closed by the parent before fork)
+            if (-1 != pipe_to_next[0]) {
+                close(pipe_to_next[0]);
+                pipe_to_next[0] = -1;
+            }
 
             // Foreground child processes should terminate upon SIGINT.
             if (SIG_ERR == signal(SIGINT, SIG_DFL)) {  // restore default behavior for SIGINT before execvp.
@@ -290,15 +302,14 @@ int run_piped_commands(int count, char** arglist)
             // waits for each child process to complete before continuing to the next one.
 
             // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
-            if ((-1 == waitpid(pid, &child_exit_code, 0)) && (errno != ECHILD) && (errno != EINTR)) {
+            if ((-1 == waitpid(pid, &child_exit_status, 0)) && (errno != ECHILD) && (errno != EINTR)) {
                 perror("waitpid failed");
                 goto cleanup;
             }
 
-            // TODO: do we even care about the child's exit code?
-            // maybe if child fails, drop the entire pipeline and continue to next command?
-            if (WIFEXITED(child_exit_code) && (0 != WEXITSTATUS(child_exit_code))) {
-                fprintf(stderr, "Error: command \"%s\" exited with code %d. Dropping the rest of the pipeline.\n", arglist[arglist_index], WEXITSTATUS(child_exit_code));
+            // if child fails, drop the entire pipeline and continue to the next command in the shell
+            if (WIFEXITED(child_exit_status) && (0 != WEXITSTATUS(child_exit_status))) {
+                fprintf(stderr, "Error: command \"%s\" exited with code %d. Dropping the rest of the pipeline.\n", arglist[arglist_index], WEXITSTATUS(child_exit_status));
                 // drop the rest of the pipeline and continue to next command.
                 return_code = GENERAL_SUCCESS;  // not considered a shell (parent process) failure.
                 goto cleanup;
