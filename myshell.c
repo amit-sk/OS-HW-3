@@ -219,10 +219,10 @@ int run_output_redirection_command(int count, char** arglist)
 int run_piped_commands(int count, char** arglist)
 {
     int return_code = GENERAL_FAILURE;
-    int child_exit_status = -1;
     int arglist_index = 0;
     int pipe_from_prev[2] = { -1, -1 };
     int pipe_to_next[2] = { -1, -1 };
+    int pids[10] = { 0 };
     int pipe_count = count_pipes(count, arglist);
     set_pipes_to_null(count, arglist);
 
@@ -233,6 +233,7 @@ int run_piped_commands(int count, char** arglist)
         goto cleanup;
     }
 
+    // run commands concurrently in a pipeline
     for (int i = 0; i <= pipe_count; i++) {
         // for each command pair inthe pipeline
         if ((i < pipe_count) && (-1 == pipe(pipe_to_next))) {
@@ -295,6 +296,8 @@ int run_piped_commands(int count, char** arglist)
         } else {
             // parent process
 
+            pids[i] = pid;  // save all pids to wait for them later.
+
             // close pipe ends in parent. mark as closed.
             if (-1 != pipe_from_prev[0]) {
                 close(pipe_from_prev[0]);
@@ -315,27 +318,21 @@ int run_piped_commands(int count, char** arglist)
             pipe_from_prev[0] = pipe_to_next[0];
             pipe_to_next[0] = -1;
 
-            // waits for each child process to complete before continuing to the next one.
-
-            // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
-            if ((-1 == waitpid(pid, &child_exit_status, 0)) && (errno != ECHILD) && (errno != EINTR)) {
-                perror("waitpid failed");
-                goto cleanup;
-            }
-
-            // if child fails, drop the entire pipeline and continue to the next command in the shell
-            if (WIFEXITED(child_exit_status) && (0 != WEXITSTATUS(child_exit_status))) {
-                fprintf(stderr, "Error: command \"%s\" exited with code %d. Dropping the rest of the pipeline.\n", arglist[arglist_index], WEXITSTATUS(child_exit_status));
-                // drop the rest of the pipeline and continue to next command.
-                return_code = GENERAL_SUCCESS;  // not considered a shell (parent process) failure.
-                goto cleanup;
-            }
-
             // progress arglist to the next command (unless on last command)
             while (arglist[arglist_index] != NULL) {
                 arglist_index++;
             }
             arglist_index++; // skip the NULL
+        }
+    }
+
+    for (int i = 0; i <= pipe_count; i++) {
+        // wait for all child processes to complete
+
+        // ECHILD and EINTR are not considered an actual error that requires exiting the shell.
+        if ((-1 == waitpid(pids[i], NULL, 0)) && (errno != ECHILD) && (errno != EINTR)) {
+            perror("waitpid failed");
+            goto cleanup;
         }
     }
 
