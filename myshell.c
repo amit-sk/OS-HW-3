@@ -17,6 +17,12 @@
 
 typedef int (*cmd_preparation_handler_t)(int, char**);
 
+void sigchld_handler(int signum)
+{
+    // wait for any child process to prevent zombies - best effort.
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
+}
+
 bool is_piping_command(int count, char** arglist)
 {
     // If a command line contains the | symbol, then it may appear multiple times. detect one such appearance.
@@ -145,6 +151,12 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
     } else if (0 == pid) {
         // child process
         // on errors, the child process calls exit. this does not cause the shell (parent process) to exit, only the child process.
+
+        if (SIG_ERR == signal(SIGCHLD, SIG_DFL)) {  // restore default behavior for SIGCHLD before execvp.
+            perror("signal failed");
+            exit(1);
+        }
+
         if (is_foreground) {
             // Foreground child processes should terminate upon SIGINT.
             if (SIG_ERR == signal(SIGINT, SIG_DFL)) {  // restore default behavior for SIGINT before execvp.
@@ -152,6 +164,7 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
                 exit(1);
             }
         }
+
         if (NULL != preparation_handler) {
             // call child handler for preprocessing (for redirections)
             if (GENERAL_SUCCESS != preparation_handler(count, arglist)) {
@@ -159,6 +172,7 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
                 exit(1);
             }
         }
+
         if (-1 == execvp(arglist[0], arglist)) {   // should not return from here unless error.
             perror("execvp failed");
             exit(1);
@@ -176,7 +190,7 @@ int run_command_internal(int count, char** arglist, bool is_foreground, cmd_prep
             }
             // not checking child status, assuming child prints and handles its own errors.
         } else {
-            waitpid(-1, NULL, WNOHANG); // reap any zombie processes - best effort.
+            waitpid(-1, NULL, WNOHANG); // reap any zombie processes that are already done - best effort.
         }
     }
 
@@ -239,6 +253,11 @@ int run_piped_commands(int count, char** arglist)
             if (-1 != pipe_to_next[0]) {
                 close(pipe_to_next[0]);
                 pipe_to_next[0] = -1;
+            }
+
+            if (SIG_ERR == signal(SIGCHLD, SIG_DFL)) {  // restore default behavior for SIGCHLD before execvp.
+                perror("signal failed");
+                exit(1);
             }
 
             // Foreground child processes should terminate upon SIGINT.
@@ -327,10 +346,20 @@ cleanup:
 
 int prepare(void)
 {
+    struct sigaction sa = {0};
+    sa.sa_handler = sigchld_handler;
+    sa.sa_flags = SA_RESTART;
+
     if (SIG_ERR == signal(SIGINT, SIG_IGN)) {  // the parent (shell) should not terminate upon SIGINT.
         perror("signal failed");
         return GENERAL_FAILURE;
     }
+
+    if (-1 == sigaction(SIGCHLD, &sa, NULL)) { // set handler for SIGCHLD to prevent zombies.
+        perror("sigaction failed");
+        return GENERAL_FAILURE;
+    }
+    
     return GENERAL_SUCCESS;
 }
 
@@ -372,13 +401,12 @@ int process_arglist(int count, char** arglist)
 
     return_value = PROC_ARGLIST_CONTINUE;
 cleanup:
-    // to prevent zombies and remove them as fast as possible - try to wait after processing each command.
-    waitpid(-1, NULL, WNOHANG); // reap any zombie processes - best effort.
     return return_value;
 }
 
 int finalize(void)
 {
     signal(SIGINT, SIG_DFL); // restore default behavior for SIGINT - best effort, doesn't check for errors.
+    signal(SIGCHLD, SIG_DFL); // restore default behavior for SIGCHLD - best effort, doesn't check for errors.
     return GENERAL_SUCCESS;
 }
